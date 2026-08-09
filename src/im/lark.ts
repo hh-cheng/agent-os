@@ -1,4 +1,8 @@
+import { mkdir } from 'node:fs/promises'
+import { extname, join } from 'node:path'
 import * as Lark from '@larksuiteoapi/node-sdk'
+
+import { parseMentions, type Mention } from './message-parser'
 
 export interface IncomingMessage {
   messageId: string
@@ -7,6 +11,10 @@ export interface IncomingMessage {
   messageType: string // 'text' | 'image' | 'post' | ...
   text: string // text 消息的正文（其他类型为空串）
   senderOpenId: string
+  rootId: string // 指向话题的根消息，根消息自己的 rootId 为空
+  threadId: string // 标记话题本身，同一话题里的消息共享这个 ID
+  mentions: Mention[]
+  rawContent: string
 }
 
 export interface BotOptions {
@@ -17,7 +25,52 @@ export interface BotOptions {
 
 export interface Bot {
   client: Lark.Client
-  reply: (messageId: string, text: string) => Promise<string | undefined>
+  reply: (
+    messageId: string,
+    text: string,
+    replyInThread?: boolean,
+  ) => Promise<string | undefined>
+  downloadResource: (
+    messageId: string,
+    fileKey: string,
+    type: 'image' | 'file',
+    saveDir: string,
+    fileName?: string,
+  ) => Promise<string>
+}
+
+const CONTENT_TYPE_EXTENSIONS: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'image/bmp': 'bmp',
+  'image/x-icon': 'ico',
+}
+
+function getHeader(headers: unknown, name: string): string {
+  if (typeof headers !== 'object' || headers === null) return ''
+
+  const headerRecord = headers as Record<string, unknown>
+  const getter = headerRecord.get
+  const value =
+    typeof getter === 'function'
+      ? getter.call(headers, name)
+      : (headerRecord[name] ?? headerRecord[name.toLowerCase()])
+  const firstValue = Array.isArray(value) ? value[0] : value
+  return typeof firstValue === 'string' ? firstValue : ''
+}
+
+function resourceExtension(
+  type: 'image' | 'file',
+  fileName: string | undefined,
+  contentType: string,
+): string {
+  const original = fileName ? extname(fileName).slice(1).toLowerCase() : ''
+  if (/^[a-z0-9]{1,10}$/.test(original)) return original
+
+  const mime = contentType.split(';', 1)[0]?.trim().toLowerCase() ?? ''
+  return CONTENT_TYPE_EXTENSIONS[mime] ?? (type === 'image' ? 'img' : 'bin')
 }
 
 function extractText(messageType: string, content: string): string {
@@ -45,12 +98,28 @@ export function startBot(opts: BotOptions) {
 
   const bot: Bot = {
     client,
-    async reply(messageId, text) {
+    async reply(messageId, text, replyInThread = false) {
       const res = await client.im.v1.message.reply({
         path: { message_id: messageId },
-        data: { msg_type: 'text', content: JSON.stringify({ text }) },
+        data: {
+          msg_type: 'text',
+          content: JSON.stringify({ text }),
+          ...(replyInThread ? { reply_in_thread: true } : {}),
+        },
       })
       return res.data?.message_id
+    },
+    async downloadResource(messageId, fileKey, type, saveDir, fileName) {
+      const res = await client.im.v1.messageResource.get({
+        path: { message_id: messageId, file_key: fileKey },
+        params: { type },
+      })
+      const contentType = getHeader(res.headers, 'content-type')
+      const extension = resourceExtension(type, fileName, contentType)
+      const savePath = join(saveDir, `${fileKey}.${extension}`)
+      await mkdir(saveDir, { recursive: true })
+      await res.writeFile(savePath)
+      return savePath
     },
   }
 
@@ -65,6 +134,10 @@ export function startBot(opts: BotOptions) {
         messageType: m.message_type,
         text: extractText(m.message_type, m.content),
         senderOpenId: data.sender.sender_id?.open_id ?? '',
+        rootId: m.root_id ?? '',
+        threadId: m.thread_id ?? '',
+        mentions: parseMentions(m.mentions),
+        rawContent: m.content,
       }
       await onMessage(msg, bot)
     },
