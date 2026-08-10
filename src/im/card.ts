@@ -75,9 +75,9 @@ export function buildTaskCard(options: TaskCardOptions): CardJson {
 /** 两秒窗口内无论 push 多少次，只提交最新的一张卡片。 */
 export class ThrottledCardUpdater {
   private closed = false
-  private pendingCard: CardJson | undefined
+  private pendingCard: CardJson | null = null
   private updateChain: Promise<void> = Promise.resolve()
-  private timer: ReturnType<typeof setTimeout> | undefined
+  private timer: ReturnType<typeof setTimeout> | null = null
 
   constructor(
     private readonly updateCard: UpdateCard,
@@ -94,23 +94,32 @@ export class ThrottledCardUpdater {
     if (this.closed) return
     this.closed = true
     if (this.timer) clearTimeout(this.timer)
-    this.timer = undefined
-    this.pendingCard = undefined
+    this.timer = null
+    this.pendingCard = null
     await this.updateChain
     await this.updateCard(finalCard)
+  }
+
+  async cancel(): Promise<void> {
+    if (this.closed) return
+    this.closed = true
+    if (this.timer) clearTimeout(this.timer)
+    this.timer = null
+    this.pendingCard = null
+    await this.updateChain
   }
 
   private schedule(): void {
     if (this.timer) return
     this.timer = setTimeout(() => {
-      this.timer = undefined
+      this.timer = null
       this.flushPending()
     }, this.intervalMs)
   }
 
   private flushPending(): void {
     const card = this.pendingCard
-    this.pendingCard = undefined
+    this.pendingCard = null
     if (!card || this.closed) return
 
     this.updateChain = this.updateChain
