@@ -7,6 +7,7 @@ import { join } from 'node:path'
 
 import { startBot, type Bot } from './im/lark'
 import { parseCommand } from './core/command-parser'
+import { JsonSessionStore } from './core/session-store'
 import { buildTaskCard, ThrottledCardUpdater } from './im/card'
 import { SessionManager, type Session } from './core/session-manager'
 import { resolveMentions, extractResourceKeys } from './im/message-parser'
@@ -21,7 +22,11 @@ if (!appId || !appSecret) {
 
 console.log('Agent OS 启动，正在建立飞书长连接…')
 
-const sessions = new SessionManager()
+// const sessions = new SessionManager()
+const sessions = await SessionManager.open({
+  store: new JsonSessionStore(join('data', 'sessions.json')),
+})
+console.log(`[会话] 已恢复 ${sessions.size} 个会话`)
 const activeRuns = new Map<string, AbortController>()
 
 function wait(ms: number, signal: AbortSignal): Promise<boolean> {
@@ -124,7 +129,7 @@ startBot({
   onMessage: async (msg, bot) => {
     const resolved = resolveMentions(msg.text, msg.mentions)
     const hasThread = !!msg.threadId || !!msg.rootId
-    const { session, isNew } = sessions.resolve(msg)
+    const { session, isNew } = await sessions.resolve(msg)
     console.log(
       `[收到] chat=${msg.chatId} threadId=${msg.threadId} rootId=${msg.rootId} sender=${msg.senderOpenId}`,
     )
@@ -240,7 +245,11 @@ startBot({
       })
       .finally(() => {
         if (activeRuns.get(session.id) === run) activeRuns.delete(session.id)
-        markSessionIdle(session.id)
+        try {
+          markSessionIdle(session.id)
+        } catch (err) {
+          console.error('[会话] 保持空闲状态失败: ', (err as Error).message)
+        }
       })
   },
 })
