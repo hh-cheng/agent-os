@@ -166,8 +166,13 @@ startBot({
 
     if (command?.name === 'close') {
       activeRuns.get(session.id)?.abort()
-      if (session.status !== 'closed')
-        await sessions.transition(session.id, 'closed')
+      if (session.status !== 'closed') {
+        try {
+          await sessions.transition(session.id, 'closed')
+        } catch (err) {
+          console.error('[会话] 关闭失败: ', (err as Error).message)
+        }
+      }
       await bot.reply(
         msg.messageId,
         '当前会话已关闭。需要继续时，请新开一个话题。',
@@ -250,7 +255,11 @@ startBot({
       })
       .finally(async () => {
         if (activeRuns.get(session.id) === run) activeRuns.delete(session.id)
-        await markSessionIdle(session.id)
+        try {
+          await markSessionIdle(session.id)
+        } catch (err) {
+          console.error('[会话] 保持空闲状态失败: ', (err as Error).message)
+        }
       })
   },
 })
