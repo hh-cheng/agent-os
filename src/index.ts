@@ -117,10 +117,14 @@ function formatSessionStatus(session: Session): string {
   ].join('\n')
 }
 
-function markSessionIdle(sessionId: string): void {
+async function markSessionIdle(sessionId: string): Promise<void> {
   if (sessions.get(sessionId)?.status !== 'active') return
-  sessions.transition(sessionId, 'idle')
-  console.log(`[会话] id=${sessionId} status=idle`)
+  try {
+    await sessions.transition(sessionId, 'idle')
+    console.log(`[会话] id=${sessionId} status=idle`)
+  } catch (err) {
+    console.error('[会话] 保持空闲状态失败: ', (err as Error).message)
+  }
 }
 
 startBot({
@@ -162,7 +166,8 @@ startBot({
 
     if (command?.name === 'close') {
       activeRuns.get(session.id)?.abort()
-      if (session.status !== 'closed') sessions.transition(session.id, 'closed')
+      if (session.status !== 'closed')
+        await sessions.transition(session.id, 'closed')
       await bot.reply(
         msg.messageId,
         '当前会话已关闭。需要继续时，请新开一个话题。',
@@ -190,7 +195,7 @@ startBot({
       return
     }
 
-    sessions.transition(session.id, 'active')
+    await sessions.transition(session.id, 'active')
     const run = new AbortController()
     activeRuns.set(session.id, run)
 
@@ -226,14 +231,14 @@ startBot({
       )
     } catch (error) {
       if (activeRuns.get(session.id) === run) activeRuns.delete(session.id)
-      markSessionIdle(session.id)
+      await markSessionIdle(session.id)
       throw error
     }
 
     if (!cardId) {
       console.error('[卡片] 响应里没有 message_id，无法继续更新')
       if (activeRuns.get(session.id) === run) activeRuns.delete(session.id)
-      markSessionIdle(session.id)
+      await markSessionIdle(session.id)
       return
     }
     console.log(`[卡片] 已发送 message_id=${cardId} inThread=${hasThread}`)
@@ -243,13 +248,9 @@ startBot({
       .catch((error) => {
         console.error('[卡片] 演示失败:', (error as Error).message)
       })
-      .finally(() => {
+      .finally(async () => {
         if (activeRuns.get(session.id) === run) activeRuns.delete(session.id)
-        try {
-          markSessionIdle(session.id)
-        } catch (err) {
-          console.error('[会话] 保持空闲状态失败: ', (err as Error).message)
-        }
+        await markSessionIdle(session.id)
       })
   },
 })
