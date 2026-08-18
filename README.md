@@ -12,4 +12,12 @@ To run:
 bun run index.ts
 ```
 
-This project was created using `bun init` in bun v1.3.14. [Bun](https://bun.com) is a fast all-in-one JavaScript runtime.
+# 接入 CLI 引擎
+
+## 接入 Claude Code
+
+```shell
+claude -p "读取 package.json，告诉我项目名称" \
+  --output-format stream-json \
+  --verbose
+```
