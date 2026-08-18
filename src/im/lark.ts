@@ -46,6 +46,12 @@ export interface Bot {
   ) => Promise<string>
 }
 
+interface PostElement {
+  tag?: string
+  text?: string
+  user_id?: string
+}
+
 const CONTENT_TYPE_EXTENSIONS: Record<string, string> = {
   'image/jpeg': 'jpg',
   'image/png': 'png',
@@ -53,6 +59,15 @@ const CONTENT_TYPE_EXTENSIONS: Record<string, string> = {
   'image/webp': 'webp',
   'image/bmp': 'bmp',
   'image/x-icon': 'ico',
+}
+
+function renderPostElement(element: PostElement): string {
+  if (element.tag === 'at') return element.user_id ?? ''
+  if (element.tag === 'br') return '\n'
+  if (['text', 'a', 'code', 'code_block', 'md'].includes(element.tag ?? '')) {
+    return element.text ?? ''
+  }
+  return ''
 }
 
 function getHeader(headers: unknown, name: string): string {
@@ -94,6 +109,29 @@ function extractText(messageType: string, content: string): string {
       .join('')
       .trim()
   }
+  return ''
+}
+
+// 支持将日志或代码粘成飞书代码块
+export function extractMessageText(
+  messageType: string,
+  content: string,
+): string {
+  const parsed = JSON.parse(content)
+
+  if (messageType === 'text') {
+    return parsed.text ?? ''
+  }
+
+  if (messageType === 'post') {
+    const paragraphs: PostElement[][] = parsed.content ?? []
+    return paragraphs
+      .map((paragraph) => paragraph.map(renderPostElement).join(''))
+      .filter(Boolean)
+      .join('\n')
+      .trim()
+  }
+
   return ''
 }
 
@@ -156,7 +194,7 @@ export function startBot(opts: BotOptions) {
         chatId: m.chat_id,
         chatType: m.chat_type,
         messageType: m.message_type,
-        text: extractText(m.message_type, m.content),
+        text: extractMessageText(m.message_type, m.content),
         senderOpenId: data.sender.sender_id?.open_id ?? '',
         rootId: m.root_id ?? '',
         threadId: m.thread_id ?? '',

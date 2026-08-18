@@ -1,9 +1,8 @@
 //* 负责编排会话的持久化与重启恢复
 import { randomUUID } from 'node:crypto'
 
+import type { CliId } from '@/cli/types'
 import type { SessionStore } from './session-store'
-
-export type CliId = 'claude'
 
 export type SessionStatus = 'creating' | 'active' | 'idle' | 'closed'
 
@@ -12,6 +11,7 @@ export interface Session {
   threadId: string // 负责找到飞书话题
   chatId: string // 划定群聊范围
   cliId: CliId // 记录以后交给哪个执行引擎，比如 Claude Code 或 Codex
+  cliSessionId?: string
   status: SessionStatus
   createdAt: string
   updatedAt: string
@@ -88,6 +88,32 @@ export class SessionManager {
     return [...this.sessions.values()].find(
       (session) => session.id === sessionId,
     )
+  }
+
+  async setCliSessionId(
+    sessionId: string,
+    cliSessionId: string,
+  ): Promise<Session> {
+    const current = this.get(sessionId)
+    if (!current) throw new Error(`会话不存在: ${sessionId}`)
+    if (!cliSessionId) throw new Error('CLI 会话 ID 不能为空')
+
+    const updated: Session = {
+      ...current,
+      cliSessionId,
+      updatedAt: this.now().toISOString(),
+    }
+    const key = sessionKey(updated.chatId, updated.threadId)
+    this.sessions.set(key, updated)
+
+    try {
+      await this.persist()
+    } catch (error) {
+      if (this.sessions.get(key) === updated) this.sessions.set(key, current)
+      throw error
+    }
+
+    return updated
   }
 
   async resolve(message: MessageAddress): Promise<ResolvedSession> {

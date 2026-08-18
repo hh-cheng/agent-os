@@ -5,6 +5,7 @@
     "target": "ESNext",
     "module": "Preserve",
     "moduleDetection": "force",
+    "paths": { "@/*": ["./src/*"], "*": ["./*"] },
     "jsx": "react-jsx",
     "allowJs": true,
     "types": ["bun"],
