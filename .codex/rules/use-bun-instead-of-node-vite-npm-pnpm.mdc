@@ -1,1 +1,30 @@
-../../CLAUDE.md
+# agent-os Codex 规则（独立副本）
+
+## 项目上下文
+
+本仓库是飞书场景下的 AI 编程指挥台，支持 `/claude` 与 `/codex`，核心依赖 Bun + 飞书 Lark WebSocket 会话编排。
+
+## 运行与栈约束
+
+- 主要运行时：Bun（优先使用 `bun`）。
+- 代码风格：TypeScript + ESM（`package.json` / `tsconfig`）。
+- 格式化与 Lint：Biome（不额外使用 ESLint/Prettier）。
+
+## 常用命令
+
+- `bun dev`
+- `bun build`
+- `bun probe:cli`
+- `bun lint`
+- `bun lint:fix`
+
+## 质量与安全
+
+- 涉及 `*.ts/.tsx/.js/.jsx` 的改动应遵循自动化 lint 流程（`bun biome`）。
+- 不提交凭证；统一通过 `.env` / `.env.example` 管理。
+- Git 提交遵循 conventional commits。
+
+## 对齐说明
+
+- 与仓库根目录 `AGENTS.md`、`CLAUDE.md` 保持一致。
+- `.codex/settings.json` 与 `.claude/settings.json` 都会触发修改后 `Biome` 自动修复；`.claude/settings.local.json` 仍为辅助执行与权限来源。
