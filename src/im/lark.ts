@@ -1,3 +1,6 @@
+/**
+ * 飞书接入：WS 长连接收消息 + REST 回消息。
+ */
 import { mkdir } from 'node:fs/promises'
 import { extname, join } from 'node:path'
 import * as Lark from '@larksuiteoapi/node-sdk'
@@ -8,12 +11,12 @@ import { parseMentions, type Mention } from './message-parser'
 export interface IncomingMessage {
   messageId: string
   chatId: string
-  chatType: string // 'p2p' 单聊 | 'group' 群聊
-  messageType: string // 'text' | 'image' | 'post' | ...
-  text: string // text 消息的正文（其他类型为空串）
+  chatType: string
+  messageType: string
+  text: string
+  rootId: string
+  threadId: string
   senderOpenId: string
-  rootId: string // 指向话题的根消息，根消息自己的 rootId 为空
-  threadId: string // 标记话题本身，同一话题里的消息共享这个 ID
   mentions: Mention[]
   rawContent: string
 }
@@ -22,6 +25,27 @@ export interface BotOptions {
   appId: string
   appSecret: string
   onMessage: (msg: IncomingMessage, bot: Bot) => Promise<void>
+  onCardAction?: (action: CardAction) => Promise<CardActionResponse | undefined>
+}
+
+export interface CardAction {
+  operatorOpenId: string
+  messageId: string
+  value: Record<string, unknown>
+}
+
+export interface CardActionResponse {
+  toast?: { type: 'success' | 'info' | 'warning' | 'error'; content: string }
+  card?: { type: 'raw'; data: CardJson }
+}
+
+export function parseCardAction(data: any): CardAction {
+  const value = data?.action?.value
+  return {
+    operatorOpenId: data?.operator?.open_id ?? data?.operator_id?.open_id ?? '',
+    messageId: data?.context?.open_message_id ?? data?.open_message_id ?? '',
+    value: isRecord(value) ? value : {},
+  }
 }
 
 export interface Bot {
@@ -46,12 +70,6 @@ export interface Bot {
   ) => Promise<string>
 }
 
-interface PostElement {
-  tag?: string
-  text?: string
-  user_id?: string
-}
-
 const CONTENT_TYPE_EXTENSIONS: Record<string, string> = {
   'image/jpeg': 'jpg',
   'image/png': 'png',
@@ -59,6 +77,32 @@ const CONTENT_TYPE_EXTENSIONS: Record<string, string> = {
   'image/webp': 'webp',
   'image/bmp': 'bmp',
   'image/x-icon': 'ico',
+}
+
+function getHeader(headers: any, name: string): string {
+  const value =
+    typeof headers?.get === 'function'
+      ? headers.get(name)
+      : (headers?.[name] ?? headers?.[name.toLowerCase()])
+  return Array.isArray(value) ? (value[0] ?? '') : (value ?? '')
+}
+
+function resourceExtension(
+  type: 'image' | 'file',
+  fileName: string | undefined,
+  contentType: string,
+): string {
+  const original = fileName ? extname(fileName).slice(1).toLowerCase() : ''
+  if (/^[a-z0-9]{1,10}$/.test(original)) return original
+
+  const mime = contentType.split(';', 1)[0]?.trim().toLowerCase() || ''
+  return CONTENT_TYPE_EXTENSIONS[mime] ?? (type === 'image' ? 'img' : 'bin')
+}
+
+interface PostElement {
+  tag?: string
+  text?: string
+  user_id?: string
 }
 
 function renderPostElement(element: PostElement): string {
@@ -70,59 +114,14 @@ function renderPostElement(element: PostElement): string {
   return ''
 }
 
-function getHeader(headers: unknown, name: string): string {
-  if (typeof headers !== 'object' || headers === null) return ''
-
-  const headerRecord = headers as Record<string, unknown>
-  const getter = headerRecord.get
-  const value =
-    typeof getter === 'function'
-      ? getter.call(headers, name)
-      : (headerRecord[name] ?? headerRecord[name.toLowerCase()])
-  const firstValue = Array.isArray(value) ? value[0] : value
-  return typeof firstValue === 'string' ? firstValue : ''
-}
-
-function resourceExtension(
-  type: 'image' | 'file',
-  fileName: string | undefined,
-  contentType: string,
-): string {
-  const original = fileName ? extname(fileName).slice(1).toLowerCase() : ''
-  if (/^[a-z0-9]{1,10}$/.test(original)) return original
-
-  const mime = contentType.split(';', 1)[0]?.trim().toLowerCase() ?? ''
-  return CONTENT_TYPE_EXTENSIONS[mime] ?? (type === 'image' ? 'img' : 'bin')
-}
-
-function extractText(messageType: string, content: string): string {
-  const parsed = JSON.parse(content)
-  if (messageType === 'text') {
-    return parsed.text ?? ''
-  }
-  if (messageType === 'post') {
-    const paragraphs: any[][] = parsed.content ?? []
-    return paragraphs
-      .flat()
-      .filter((el) => el.tag === 'text')
-      .map((el) => el.text)
-      .join('')
-      .trim()
-  }
-  return ''
-}
-
-// 支持将日志或代码粘成飞书代码块
 export function extractMessageText(
   messageType: string,
   content: string,
 ): string {
   const parsed = JSON.parse(content)
-
   if (messageType === 'text') {
     return parsed.text ?? ''
   }
-
   if (messageType === 'post') {
     const paragraphs: PostElement[][] = parsed.content ?? []
     return paragraphs
@@ -131,18 +130,17 @@ export function extractMessageText(
       .join('\n')
       .trim()
   }
-
   return ''
 }
 
-export function startBot(opts: BotOptions) {
-  const { appId, appSecret, onMessage } = opts
+export function startBot(opts: BotOptions): Bot {
+  const { appId, appSecret, onMessage, onCardAction } = opts
 
-  // 负责所有主动调 API 的动作
   const client = new Lark.Client({ appId, appSecret })
 
   const bot: Bot = {
     client,
+
     async reply(messageId, text, replyInThread = false) {
       const res = await client.im.v1.message.reply({
         path: { message_id: messageId },
@@ -154,6 +152,7 @@ export function startBot(opts: BotOptions) {
       })
       return res.data?.message_id
     },
+
     async replyCard(messageId, card, replyInThread = false) {
       const res = await client.im.v1.message.reply({
         path: { message_id: messageId },
@@ -165,12 +164,14 @@ export function startBot(opts: BotOptions) {
       })
       return res.data?.message_id
     },
+
     async updateCard(messageId, card) {
       await client.im.v1.message.patch({
         path: { message_id: messageId },
         data: { content: JSON.stringify(card) },
       })
     },
+
     async downloadResource(messageId, fileKey, type, saveDir, fileName) {
       const res = await client.im.v1.messageResource.get({
         path: { message_id: messageId, file_key: fileKey },
@@ -185,8 +186,11 @@ export function startBot(opts: BotOptions) {
     },
   }
 
-  // 负责分发，按事件名路由到对应的处理函数
   const dispatcher = new Lark.EventDispatcher({}).register({
+    'card.action.trigger': async (data: any) => {
+      if (!onCardAction) return undefined
+      return onCardAction(parseCardAction(data))
+    },
     'im.message.receive_v1': async (data) => {
       const m = data.message
       const msg: IncomingMessage = {
@@ -195,9 +199,9 @@ export function startBot(opts: BotOptions) {
         chatType: m.chat_type,
         messageType: m.message_type,
         text: extractMessageText(m.message_type, m.content),
-        senderOpenId: data.sender.sender_id?.open_id ?? '',
         rootId: m.root_id ?? '',
         threadId: m.thread_id ?? '',
+        senderOpenId: data.sender.sender_id?.open_id ?? '',
         mentions: parseMentions(m.mentions),
         rawContent: m.content,
       }
@@ -205,9 +209,12 @@ export function startBot(opts: BotOptions) {
     },
   })
 
-  // 维护 WebSocket 长连接，断了自动重连
   const wsClient = new Lark.WSClient({ appId, appSecret })
   wsClient.start({ eventDispatcher: dispatcher })
 
   return bot
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
 }
