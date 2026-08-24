@@ -1,6 +1,6 @@
 /**
  * Agent OS 入口。
- * 当前阶段：一个话题对应一个内存会话。
+ * 当前阶段：飞书消息驱动 Claude Code 完成任务。
  */
 import 'dotenv/config'
 import { join, resolve } from 'node:path'
@@ -8,9 +8,10 @@ import { join, resolve } from 'node:path'
 import { startBot } from './im/lark'
 import { runCli } from './cli/runner'
 import { buildTaskCard } from './im/card'
-import { ClaudeAdapter } from './cli/claude-adapter'
 import { parseCommand } from './core/command-parser'
+import { ClaudeAdapter } from './cli/claude-adapter'
 import { JsonSessionStore } from './core/session-store'
+import { TaskProgressTracker } from './core/task-progress'
 import { SessionManager, type Session } from './core/session-manager'
 import { resolveMentions, extractResourceKeys } from './im/message-parser'
 
@@ -23,7 +24,6 @@ if (!appId || !appSecret) {
   console.error('缺少 BOT_A_APP_ID / BOT_A_APP_SECRET，请检查 .env')
   process.exit(1)
 }
-
 console.log('Agent OS 启动，正在建立飞书长连接…')
 console.log(`[CLI] command=${cliAdapter.command} cwd=${cliWorkdir}`)
 
@@ -37,21 +37,23 @@ function executeCli(
   prompt: string,
   sessionId: string | undefined,
   signal: AbortSignal,
+  onEvent: Parameters<typeof runCli>[0]['onEvent'],
 ) {
   return runCli({
-    prompt,
-    signal,
-    sessionId,
-    cwd: cliWorkdir,
     adapter: cliAdapter,
+    prompt,
+    cwd: cliWorkdir,
+    sessionId,
+    signal,
+    onEvent,
   })
 }
 
 const STATUS_LABELS: Record<Session['status'], string> = {
-  idle: '空闲',
-  active: '执行中',
-  closed: '已关闭',
   creating: '创建中',
+  active: '执行中',
+  idle: '空闲',
+  closed: '已关闭',
 }
 
 function formatSessionStatus(session: Session): string {
@@ -67,12 +69,8 @@ function formatSessionStatus(session: Session): string {
 
 async function markSessionIdle(sessionId: string): Promise<void> {
   if (sessions.get(sessionId)?.status !== 'active') return
-  try {
-    await sessions.transition(sessionId, 'idle')
-    console.log(`[会话] id=${sessionId} status=idle`)
-  } catch (err) {
-    console.error('[会话] 保持空闲状态失败: ', (err as Error).message)
-  }
+  await sessions.transition(sessionId, 'idle')
+  console.log(`[会话] id=${sessionId} status=idle`)
 }
 
 startBot({
@@ -94,8 +92,8 @@ startBot({
       `  [会话] ${isNew ? '新建' : '复用'} id=${session.id} status=${session.status}`,
     )
 
-    //* 命令路由
     const command = parseCommand(resolved)
+
     if (command?.name === 'help') {
       await bot.reply(
         msg.messageId,
@@ -114,13 +112,8 @@ startBot({
 
     if (command?.name === 'close') {
       activeRuns.get(session.id)?.abort()
-      if (session.status !== 'closed') {
-        try {
-          await sessions.transition(session.id, 'closed')
-        } catch (err) {
-          console.error('[会话] 关闭失败: ', (err as Error).message)
-        }
-      }
+      if (session.status !== 'closed')
+        await sessions.transition(session.id, 'closed')
       await bot.reply(
         msg.messageId,
         '当前会话已关闭。需要继续时，请新开一个话题。',
@@ -129,11 +122,19 @@ startBot({
       return
     }
 
-    //* 会话路由
     if (session.status === 'closed') {
       await bot.reply(
         msg.messageId,
         '这个话题的会话已经关闭，请新开一个话题继续。',
+        hasThread,
+      )
+      return
+    }
+
+    if (!isNew && session.status === 'creating') {
+      await bot.reply(
+        msg.messageId,
+        '当前会话正在准备，请稍后再追问。',
         hasThread,
       )
       return
@@ -169,7 +170,7 @@ startBot({
       }
     }
 
-    // 先回复一张卡片，后续更新复用同一个 message_id。
+    // 先回复一张卡片，让用户知道任务已经进入执行队列。
     let cardId: string | undefined
     try {
       cardId = await bot.replyCard(
@@ -196,12 +197,34 @@ startBot({
     }
     console.log(`[卡片] 已发送 message_id=${cardId} inThread=${hasThread}`)
 
-    void executeCli(resolved, session.cliSessionId, run.signal)
+    const progress = new TaskProgressTracker()
+
+    // 让事件回调尽快返回，Claude Code 在后台继续执行。
+    void executeCli(resolved, session.cliSessionId, run.signal, (event) => {
+      if (
+        event.type !== 'tool_start' &&
+        event.type !== 'tool_end' &&
+        event.type !== 'context'
+      ) {
+        return
+      }
+
+      const snapshot = progress.accept(event)
+      const currentDetail = snapshot.currentDetail
+        ? ` detail=${snapshot.currentDetail}`
+        : ''
+      const context =
+        snapshot.contextUsedTokens === undefined
+          ? ''
+          : ` context=${snapshot.contextUsedTokens}`
+      console.log(
+        `[进度] ${snapshot.current}${currentDetail} tools=${snapshot.completedCount}/${snapshot.toolCount}${context}`,
+      )
+    })
       .then(async (result) => {
         if (result.sessionId && result.sessionId !== session.cliSessionId) {
           await sessions.setCliSessionId(session.id, result.sessionId)
         }
-
         await bot.updateCard(
           cardId,
           buildTaskCard({
@@ -211,24 +234,23 @@ startBot({
             detail: '执行完成',
           }),
         )
-
         await bot.reply(msg.messageId, result.answer, hasThread)
         console.log(`[CLI] 完成 session_id=${result.sessionId ?? '(无)'}`)
       })
-      .catch(async (err: Error) => {
+      .catch(async (error) => {
         if (run.signal.aborted) {
           console.log('[CLI] 任务已取消')
           return
         }
-        const message = err.message
+        const message = (error as Error).message
         console.error('[CLI] 执行失败:', message)
         await bot.updateCard(
           cardId,
           buildTaskCard({
+            title: 'Claude Code 任务',
+            status: 'failed',
             progress: 0,
             detail: message,
-            status: 'failed',
-            title: 'Claude Code 任务',
           }),
         )
         await bot.reply(
