@@ -1,15 +1,16 @@
-import { killCli, spawnCli } from './spawn-cli'
-import type { CliAdapter, CliEvent, CliRunResult } from './types'
+import { killCli, spawnCli } from './spawn-cli.js'
+import { promptInputForPlatform } from './types.js'
+import type { CliAdapter, CliEvent, CliRunResult } from './types.js'
 
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000
 
 export interface RunCliOptions {
-  cwd: string
-  prompt: string
   adapter: CliAdapter
+  prompt: string
+  cwd: string
   sessionId?: string
-  timeoutMs?: number
   signal?: AbortSignal
+  timeoutMs?: number
   onEvent?: (event: CliEvent) => void
 }
 
@@ -23,29 +24,37 @@ export async function runCli(options: RunCliOptions): Promise<CliRunResult> {
     timeoutMs = DEFAULT_TIMEOUT_MS,
     onEvent,
   } = options
-
+  // Windows 下 prompt 走 stdin（规避 cmd 转义/乱码），其他平台直接作为命令行参数。
+  const promptInput = promptInputForPlatform(process.platform)
+  const useStdin = promptInput === 'stdin'
   const args = sessionId
-    ? adapter.buildResumeArgs(prompt, sessionId)
-    : adapter.buildArgs(prompt)
+    ? adapter.buildResumeArgs(prompt, sessionId, promptInput)
+    : adapter.buildArgs(prompt, promptInput)
 
   const child = spawnCli(adapter.command, args, {
     cwd,
     signal,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['pipe', 'pipe', 'pipe'],
   })
 
+  if (child.stdin && typeof child.stdin !== 'number') {
+    if (useStdin) child.stdin.write(prompt)
+    child.stdin.end()
+  }
+
+  let observedSessionId = sessionId
+  let observedAnswer: string | undefined
+  let observedStats: CliRunResult['stats']
+  let resultError: Error | undefined
   let stderr = ''
   let timedOut = false
-  let observedSessionId = sessionId
-  let resultError: Error | undefined
-  let finalResult: CliRunResult | undefined
 
   const timer = setTimeout(() => {
     timedOut = true
     killCli(child)
   }, timeoutMs)
-
-  const finish = () => clearTimeout(timer)
+  const abort = () => killCli(child)
+  signal?.addEventListener('abort', abort, { once: true })
 
   function processLine(line: string) {
     for (const event of adapter.parseEvents(line)) {
@@ -58,84 +67,71 @@ export async function runCli(options: RunCliOptions): Promise<CliRunResult> {
         continue
       }
       if (event.type === 'result') {
-        finalResult = {
-          answer: event.answer,
-          sessionId: event.sessionId ?? observedSessionId,
-          ...(event.stats ? { stats: event.stats } : {}),
-        }
+        if (event.answer) observedAnswer = event.answer
+        if (event.stats) observedStats = event.stats
       }
     }
   }
 
-  // Read stdout as a Web ReadableStream (Bun native)
-  const stdoutReader = (child.stdout as ReadableStream<Uint8Array>).getReader()
-  const stdoutDecoder = new TextDecoder()
-  let stdoutBuffer = ''
+  async function readStdout() {
+    const stdout = child.stdout as ReadableStream<Uint8Array>
+    const reader = stdout.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
 
-  const readStdout = async () => {
-    try {
-      while (true) {
-        const { done, value } = await stdoutReader.read()
-        if (done) break
-        stdoutBuffer += stdoutDecoder.decode(value, { stream: true })
-        const lines = stdoutBuffer.split('\n')
-        stdoutBuffer = lines.pop() || ''
-        for (const line of lines) processLine(line)
-      }
-      // flush remaining buffer
-      if (stdoutBuffer) processLine(stdoutBuffer)
-    } catch {
-      // stream was cancelled (signal abort / kill)
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) processLine(line)
     }
+
+    buffer += decoder.decode()
+    if (buffer) processLine(buffer)
   }
 
-  // Read stderr as a Web ReadableStream
-  const stderrReader = (child.stderr as ReadableStream<Uint8Array>).getReader()
-  const stderrDecoder = new TextDecoder()
+  async function readStderr() {
+    const stderrStream = child.stderr as ReadableStream<Uint8Array>
+    const reader = stderrStream.getReader()
+    const decoder = new TextDecoder()
 
-  const readStderr = async () => {
-    try {
-      while (true) {
-        const { done, value } = await stderrReader.read()
-        if (done) break
-        stderr += stderrDecoder.decode(value, { stream: true })
-      }
-    } catch {
-      // stream was cancelled
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      stderr += decoder.decode(value, { stream: true })
     }
+    stderr += decoder.decode()
   }
 
-  // Wait for all streams and process to finish
-  let exitCode = 0
+  let exitCode: number
   try {
-    await Promise.all([
+    ;[, , exitCode] = await Promise.all([
       readStdout(),
       readStderr(),
-      child.exited.then((code) => {
-        exitCode = code
-      }),
+      child.exited,
     ])
-  } catch {
-    // safety net: Bun.spawn already throws synchronously on spawn failure,
-    // but child.exited may reject if the internal watcher fails
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', abort)
   }
 
-  finish()
-
-  if (timedOut) {
-    throw new Error(`${adapter.displayName} 执行超时`)
-  }
-  if (signal?.aborted) {
-    throw new Error(`${adapter.displayName} 执行已取消`)
-  }
+  if (timedOut) throw new Error(`${adapter.displayName} 执行超时`)
+  if (signal?.aborted) throw new Error(`${adapter.displayName} 执行已取消`)
   if (resultError) throw resultError
   if (exitCode !== 0) {
     throw new Error(
       stderr.trim() || `${adapter.displayName} 退出，状态码 ${exitCode}`,
     )
   }
-  if (!finalResult) {
+  if (!observedAnswer) {
     throw new Error(`${adapter.displayName} 没有返回最终结果`)
   }
-  return finalResult
+
+  return {
+    answer: observedAnswer,
+    sessionId: observedSessionId,
+    ...(observedStats ? { stats: observedStats } : {}),
+  }
 }
