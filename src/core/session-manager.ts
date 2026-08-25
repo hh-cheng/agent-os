@@ -13,6 +13,7 @@ export interface Session {
   chatId: string // 划定群聊范围
   cliId: CliId // 记录以后交给哪个执行引擎，比如 Claude Code 或 Codex
   cliSessionId?: string
+  workspaceDir: string
   status: SessionStatus
   createdAt: string
   updatedAt: string
@@ -37,7 +38,7 @@ export interface SessionManagerOptions {
 }
 
 const ALLOWED_TRANSITIONS: Record<SessionStatus, SessionStatus[]> = {
-  creating: ['active', 'closed'],
+  creating: ['idle', 'active', 'closed'],
   active: ['idle', 'closed'],
   idle: ['active', 'closed'],
   closed: [],
@@ -121,6 +122,7 @@ export class SessionManager {
     message: MessageAddress,
     cliId: CliId = 'claude',
     botId = 'default',
+    workspaceDir = process.cwd(),
   ): Promise<ResolvedSession> {
     const threadId = topicIdOf(message)
     const key = sessionKey(botId, message.chatId, threadId)
@@ -132,6 +134,7 @@ export class SessionManager {
       cliId,
       botId,
       threadId,
+      workspaceDir,
       status: 'creating',
       id: this.createId(),
       chatId: message.chatId,
@@ -176,6 +179,32 @@ export class SessionManager {
       throw err
     }
 
+    return updated
+  }
+
+  async setWorkspaceDir(
+    sessionId: string,
+    workspaceDir: string,
+  ): Promise<Session> {
+    const current = this.get(sessionId)
+    if (!current) throw new Error(`会话不存在: ${sessionId}`)
+    if (!workspaceDir) throw new Error('工作目录不能为空')
+    if (current.workspaceDir === workspaceDir) return current
+
+    const { cliSessionId: _previousCliSessionId, ...rest } = current
+    const updated: Session = {
+      ...rest,
+      workspaceDir,
+      updatedAt: this.now().toISOString(),
+    }
+    const key = sessionKey(updated.botId, updated.chatId, updated.threadId)
+    this.sessions.set(key, updated)
+    try {
+      await this.persist()
+    } catch (error) {
+      if (this.sessions.get(key) === updated) this.sessions.set(key, current)
+      throw error
+    }
     return updated
   }
 }

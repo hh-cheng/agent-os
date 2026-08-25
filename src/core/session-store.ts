@@ -3,7 +3,8 @@ import { z } from 'zod'
 import { dirname } from 'node:path'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 
-import type { Session } from './session-manager.js'
+import { isRecord } from '../utils'
+import type { Session } from './session-manager'
 
 export interface SessionStore {
   load(): Promise<Session[]>
@@ -17,10 +18,35 @@ const SessionSchema = z.object({
   botId: z.string().min(1),
   cliId: z.enum(['claude', 'codex']),
   cliSessionId: z.string().min(1).optional(),
+  workspaceDir: z.string().min(1),
   status: z.enum(['creating', 'active', 'idle', 'closed']),
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
 })
+
+// 给旧记录补充确实的 botId 和 workspaceDir
+function migrateLegacySession(
+  row: unknown,
+  legacyBotId: string,
+  defaultWorkspaces: Readonly<Record<string, string>>,
+): { candidate: unknown; migrated: boolean } {
+  if (!isRecord(row)) return { candidate: row, migrated: false }
+
+  const needsBotId = !('botId' in row)
+  const needsWorkspace = !('workspaceDir' in row)
+  if (!needsBotId && !needsWorkspace) {
+    return { candidate: row, migrated: false }
+  }
+
+  const candidate: Record<string, unknown> = { ...row }
+  if (needsBotId) candidate.botId = legacyBotId
+  const botId =
+    typeof candidate.botId === 'string' ? candidate.botId : legacyBotId
+  if (needsWorkspace) {
+    candidate.workspaceDir = defaultWorkspaces[botId] ?? process.cwd()
+  }
+  return { candidate, migrated: true }
+}
 
 function recoverInterruptedSession(session: Session): Session {
   if (session.status !== 'creating' && session.status !== 'active') {
@@ -35,6 +61,7 @@ export class JsonSessionStore implements SessionStore {
   constructor(
     private readonly filePath: string,
     private readonly legacyBotId = 'default',
+    private readonly defaultWorkspaces: Readonly<Record<string, string>> = {},
   ) {}
 
   async load(): Promise<Session[]> {
@@ -54,9 +81,12 @@ export class JsonSessionStore implements SessionStore {
     const sessions: Session[] = []
     let needsCleanup = false
     for (const row of rows) {
-      const isLegacy =
-        typeof row === 'object' && row !== null && !('botId' in row)
-      const candidate = isLegacy ? { ...row, botId: this.legacyBotId } : row
+      const { candidate, migrated } = migrateLegacySession(
+        row,
+        this.legacyBotId,
+        this.defaultWorkspaces,
+      )
+
       const result = SessionSchema.safeParse(candidate)
 
       if (!result.success) {
@@ -64,7 +94,7 @@ export class JsonSessionStore implements SessionStore {
         continue
       }
 
-      if (isLegacy) needsCleanup = true
+      if (migrated) needsCleanup = true
 
       const recovered = recoverInterruptedSession(result.data)
       if (recovered.status !== result.data.status) needsCleanup = true

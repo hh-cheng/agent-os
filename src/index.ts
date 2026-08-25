@@ -16,6 +16,10 @@ import { SessionManager, type Session } from './core/session-manager'
 import { parseCommand, parseCliRequest } from './core/command-parser'
 import { resolveMentions, extractResourceKeys } from './im/message-parser'
 import {
+  ensureWorkspaceDirectory,
+  resolveWorkspacePath,
+} from './core/workspace'
+import {
   buildBotPrompt,
   loadBotConfigs,
   type BotConfig,
@@ -28,13 +32,24 @@ import {
   ThrottledCardUpdater,
 } from './im/card'
 
-const cliWorkdir = resolve(process.env.CLAUDE_WORKDIR ?? process.cwd())
 const botConfigPath = resolve(
   process.env.BOTS_CONFIG ?? join('config', 'bots.json'),
 )
 const botConfigs = await loadBotConfigs(botConfigPath)
+
+await Promise.all(
+  botConfigs.map((config) => ensureWorkspaceDirectory(config.workspaceDir)),
+)
+const defaultWorkspaces = Object.fromEntries(
+  botConfigs.map((config) => [config.id, config.workspaceDir]),
+)
+
 const sessions = await SessionManager.open({
-  store: new JsonSessionStore(join('data', 'sessions.json'), botConfigs[0]?.id),
+  store: new JsonSessionStore(
+    join('data', 'sessions.json'),
+    botConfigs[0]?.id,
+    defaultWorkspaces,
+  ),
 })
 
 const activeRuns = new Map<string, ActiveRun>()
@@ -45,9 +60,7 @@ console.log(
   `[配置] 已注册 ${botConfigs.length} 个 bot，已恢复 ${sessions.size} 个会话`,
 )
 for (const adapter of listCliAdapters()) {
-  console.log(
-    `[CLI] id=${adapter.id} command=${adapter.command} cwd=${cliWorkdir}`,
-  )
+  console.log(`[CLI] id=${adapter.id} command=${adapter.command}`)
 }
 for (const config of botConfigs) {
   console.log(
@@ -58,6 +71,7 @@ for (const config of botConfigs) {
 function executeCli(
   adapter: CliAdapter,
   prompt: string,
+  workspaceDir: string,
   sessionId: string | undefined,
   signal: AbortSignal,
   onEvent: Parameters<typeof runCli>[0]['onEvent'],
@@ -68,7 +82,7 @@ function executeCli(
     adapter,
     onEvent,
     sessionId,
-    cwd: cliWorkdir,
+    cwd: workspaceDir,
   })
 }
 
@@ -87,6 +101,7 @@ function formatSessionStatus(session: Session, botId: string): string {
     `状态：${STATUS_LABELS[session.status]}`,
     `执行引擎：${adapter.displayName}`,
     `CLI 会话：${session.cliSessionId ?? '(尚未建立)'}`,
+    `工作目录：${session.workspaceDir}`,
     `话题：${session.threadId}`,
     `更新时间：${session.updatedAt}`,
   ].join('\n')
@@ -129,6 +144,7 @@ async function startConfiguredBot(config: BotConfig): Promise<void> {
     onMessage: async (msg, bot) => {
       const resolved = resolveMentions(msg.text, msg.mentions)
       const hasThread = !!msg.threadId || !!msg.rootId
+      const command = parseCommand(resolved)
       const cliRequest = parseCliRequest(resolved)
 
       if (cliRequest && !cliRequest.prompt) {
@@ -140,11 +156,20 @@ async function startConfiguredBot(config: BotConfig): Promise<void> {
         return
       }
 
-      const { session, isNew } = await sessions.resolve(
+      // const { session, isNew } = await sessions.resolve(
+      const resolvedSession = await sessions.resolve(
         msg,
         cliRequest?.cliId ?? config.defaultCliId,
         config.id,
+        config.workspaceDir,
       )
+
+      let { session } = resolvedSession
+      const { isNew } = resolvedSession
+      if (command && isNew && session.status === 'creating') {
+        session = await sessions.transition(session.id, 'idle')
+      }
+
       const cliAdapter = getCliAdapter(session.cliId)
       const prompt = buildBotPrompt(
         config.systemPrompt,
@@ -172,12 +197,13 @@ async function startConfiguredBot(config: BotConfig): Promise<void> {
         return
       }
 
-      const command = parseCommand(resolved)
       if (command?.name === 'help') {
         await bot.reply(
           msg.messageId,
           [
             '/status 查看当前会话',
+            '/cd 查看当前工作目录',
+            '/cd <目录> 切换当前话题的工作目录',
             '/close 关闭当前会话',
             '/help 查看命令',
             '/claude <任务> 新话题使用 Claude Code',
@@ -194,6 +220,50 @@ async function startConfiguredBot(config: BotConfig): Promise<void> {
           formatSessionStatus(session, config.id),
           hasThread,
         )
+        return
+      }
+
+      if (command?.name === 'cd') {
+        if (!command.path) {
+          await bot.reply(
+            msg.messageId,
+            `当前工作目录：${session.workspaceDir}`,
+            hasThread,
+          )
+          return
+        }
+
+        if (session.status === 'active') {
+          await bot.reply(
+            msg.messageId,
+            '当前任务仍在执行，结束后再切换工作目录。',
+            hasThread,
+          )
+          return
+        }
+
+        try {
+          const workspaceDir = resolveWorkspacePath(
+            command.path,
+            session.workspaceDir,
+          )
+          await ensureWorkspaceDirectory(workspaceDir)
+          const changed = workspaceDir !== session.workspaceDir
+          await sessions.setWorkspaceDir(session.id, workspaceDir)
+          await bot.reply(
+            msg.messageId,
+            changed
+              ? `工作目录已切换到：${workspaceDir}\n下一条任务会在这里建立新的 CLI 会话。`
+              : `当前工作目录已经是：${workspaceDir}`,
+            hasThread,
+          )
+        } catch (error) {
+          await bot.reply(
+            msg.messageId,
+            `无法切换工作目录：${(error as Error).message}`,
+            hasThread,
+          )
+        }
         return
       }
 
@@ -322,6 +392,7 @@ async function startConfiguredBot(config: BotConfig): Promise<void> {
       void executeCli(
         cliAdapter,
         prompt,
+        session.workspaceDir,
         session.cliSessionId,
         run.signal,
         (event) => {
