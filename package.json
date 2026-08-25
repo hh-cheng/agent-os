@@ -10,7 +10,7 @@
   },
   "scripts": {
     "prepare": "husky",
-    "dev": "bun src/index.ts",
+    "dev": "bun --watch src/index.ts",
     "build": "bun build src/index.ts --outdir dist --target bun",
     "probe:cli": "bun src/probe-cli.ts",
     "lint": "biome check .",
