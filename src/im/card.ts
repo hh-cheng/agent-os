@@ -1,8 +1,21 @@
 /**
  * 飞书任务卡片：把 CLI 事件整理成稳定、低噪音的任务进度。
  */
-import type { CliRunStats } from '../cli/types'
+import type { CliRunStats, CliSessionSummary } from '../cli/types'
 import type { TaskActivity, TaskProgressSnapshot } from '../core/task-progress'
+
+export interface ResumeCardOptions {
+  agentSessionId: string
+  cliName: string
+  currentCliSessionId?: string
+  sessions: CliSessionSummary[]
+}
+
+export interface SessionNoticeCardOptions {
+  title: string
+  detail: string
+  template?: 'blue' | 'green' | 'grey'
+}
 
 export type CardJson = Record<string, unknown>
 export type TaskStatus = 'running' | 'success' | 'failed' | 'cancelled'
@@ -440,5 +453,119 @@ export class ThrottledCardUpdater {
       .finally(() => {
         if (this.pendingCard && !this.closed) this.schedule()
       })
+  }
+}
+
+function formatSessionTime(value: string): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: 'numeric',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(date)
+}
+
+export function buildResumeCard(options: ResumeCardOptions): CardJson {
+  const elements: Record<string, unknown>[] = options.sessions.length
+    ? options.sessions.flatMap((session, index) => {
+        const current = session.id === options.currentCliSessionId
+        const row: Record<string, unknown> = {
+          tag: 'column_set',
+          flex_mode: 'none',
+          horizontal_spacing: '12px',
+          columns: [
+            {
+              tag: 'column',
+              width: 'weighted',
+              weight: 4,
+              elements: [
+                {
+                  tag: 'markdown',
+                  content: `**${escapeFeishuMarkdown(session.title)}**\n_${formatSessionTime(session.updatedAt)} · ${session.id.slice(0, 8)}_`,
+                },
+              ],
+            },
+            {
+              tag: 'column',
+              width: 'auto',
+              vertical_align: 'center',
+              elements: current
+                ? [{ tag: 'markdown', content: '**当前会话**' }]
+                : [
+                    {
+                      tag: 'button',
+                      text: { tag: 'plain_text', content: '恢复' },
+                      type: 'primary_filled',
+                      size: 'medium',
+                      behaviors: [
+                        {
+                          type: 'callback',
+                          value: {
+                            action: 'resume_cli_session',
+                            agentSessionId: options.agentSessionId,
+                            cliSessionId: session.id,
+                          },
+                        },
+                      ],
+                    },
+                  ],
+            },
+          ],
+        }
+        return index === options.sessions.length - 1
+          ? [row]
+          : [row, { tag: 'hr' }]
+      })
+    : [
+        {
+          tag: 'markdown',
+          content:
+            '当前工作目录里还没有可以恢复的 CLI 会话。先完成一次任务，再用 `/new` 开启新会话。',
+        },
+      ]
+
+  return {
+    schema: '2.0',
+    config: {
+      update_multi: true,
+      summary: { content: `${options.cliName}：选择历史会话` },
+    },
+    header: {
+      template: 'blue',
+      title: { tag: 'plain_text', content: '恢复历史会话' },
+      subtitle: { tag: 'plain_text', content: options.cliName },
+    },
+    body: {
+      direction: 'vertical',
+      vertical_spacing: '12px',
+      elements: [
+        {
+          tag: 'markdown',
+          content: '选择后，当前话题会继续使用对应的 CLI 上下文。',
+        },
+        ...elements,
+      ],
+    },
+  }
+}
+
+export function buildSessionNoticeCard(
+  options: SessionNoticeCardOptions,
+): CardJson {
+  return {
+    schema: '2.0',
+    config: { summary: { content: options.title } },
+    header: {
+      template: options.template ?? 'blue',
+      title: { tag: 'plain_text', content: options.title },
+    },
+    body: {
+      direction: 'vertical',
+      vertical_spacing: '12px',
+      elements: [{ tag: 'markdown', content: options.detail }],
+    },
   }
 }
