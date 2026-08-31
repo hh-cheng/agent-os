@@ -27,8 +27,26 @@ cp .env.example .env
 - `appIdEnv` 与 `appSecretEnv`：对应 `.env` 中飞书应用凭证的变量名；
 - `defaultCli`：新话题默认使用的 `claude` 或 `codex`；
 - `workspace`：该机器人的默认工作目录，可使用相对路径或绝对路径。
+- `systemPrompt`：追加给该机器人的角色与任务说明；
+- `reviewBy`：可选。任务成功完成后，将代码审查派发给指定的已启用机器人。
 
 然后在 `.env` 中填入对应飞书自建应用的 App ID 和 App Secret。`config/bots.json` 与 `.env` 均已忽略，不会被提交。
+
+### 自动代码审查（可选）
+
+为开发机器人配置 `reviewBy` 后，普通编码任务成功完成时，Agent OS 会在原话题中发送审查卡片并 `@` 指定审查机器人。审查机器人使用同一个 `workspace` 读取实现和当前 Git 改动，完成后会在话题中通知开发机器人。
+
+```json
+{
+  "id": "developer",
+  "defaultCli": "codex",
+  "workspace": "../agent-os-playground",
+  "systemPrompt": "你是主力开发助手，负责理解需求并完成实现。",
+  "reviewBy": "reviewer"
+}
+```
+
+`reviewBy` 必须指向另一个已启用机器人的 `id`，不能指向自身。建议将两个机器人的 `workspace` 都设为独立的、已初始化 Git 的 playground，而不是 Agent OS 仓库本身。修改 `config/bots.json` 后需重启服务才会生效。
 
 ### 3. 启动服务
 
@@ -52,7 +70,7 @@ bun dev
 
 ```bash
 bun lint
-bun build
+bun run build
 bun probe:cli
 ```
 
