@@ -4,12 +4,14 @@ export interface CollaborationMessage {
   taskId: string // 标识整项写作
   fromBotId: string
   toBotId: string
+  round: number
+  maxRounds: number
   workspaceDir: string
   prompt: string
 }
 
 export function collaborationTurnKey(message: CollaborationMessage) {
-  return `${message.taskId}:${message.toBotId}`
+  return `${message.taskId}:${message.round}:${message.toBotId}`
 }
 
 export class CollaborationInbox {

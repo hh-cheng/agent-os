@@ -11,6 +11,7 @@ export interface BotConfig {
   defaultCliId: CliId
   systemPrompt: string
   workspaceDir: string
+  collaborationMaxRounds: number
   reviewBy?: string
 }
 
@@ -29,6 +30,7 @@ const BotSchema = z.object({
   workspace: z.string().trim().min(1).optional(),
   systemPrompt: z.string().trim().optional().default(''),
   enabled: z.boolean().optional().default(true),
+  collaborationMaxRounds: z.number().int().min(1).max(4).optional().default(2),
   reviewBy: z
     .string()
     .regex(/^[a-z0-9][a-z0-9_-]{0,31}$/)
@@ -69,6 +71,7 @@ export function parseBotConfigs(
         reviewBy: bot.reviewBy,
         defaultCliId: bot.defaultCli,
         systemPrompt: bot.systemPrompt,
+        collaborationMaxRounds: bot.collaborationMaxRounds,
         workspaceDir: resolveWorkspacePath(
           bot.workspace ?? env.CLI_WORKDIR ?? env.CLAUDE_WORKDIR ?? '.',
           baseDirectory,

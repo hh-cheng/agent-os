@@ -21,9 +21,23 @@ export function spawnCli(
   args: string[],
   options?: SpawnCliOptions,
 ): Subprocess {
+  const env = { ...(options?.env ?? process.env) }
+  const proxy = env.CLI_PROXY_URL?.trim()
+  if (proxy) {
+    for (const key of [
+      'HTTP_PROXY',
+      'HTTPS_PROXY',
+      'ALL_PROXY',
+      'http_proxy',
+      'https_proxy',
+      'all_proxy',
+    ])
+      env[key] = proxy
+  }
   return Bun.spawn({
     cmd: [command, ...args],
     ...options,
+    env,
     stdout: options?.stdout ?? 'pipe',
     stderr: options?.stderr ?? 'pipe',
     stdin: options?.stdin ?? 'pipe',

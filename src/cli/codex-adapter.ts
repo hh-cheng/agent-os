@@ -1,3 +1,4 @@
+import { asNumber, isRecord, shortText } from '@/utils'
 import type { CliAdapter, CliEvent, CliPromptInput, CliRunStats } from './types'
 
 interface CodexEvent {
@@ -7,21 +8,6 @@ interface CodexEvent {
   usage?: unknown
   error?: unknown
   message?: unknown
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null
-}
-
-function asNumber(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : void 0
-}
-
-function shortText(value: unknown, maxLength = 72): string | undefined {
-  if (typeof value !== 'string') return
-  const text = value.replace(/\s+/g, ' ').trim()
-  if (!text) return
-  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text
 }
 
 function firstChangedPath(item: Record<string, unknown>): string | undefined {
