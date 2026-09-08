@@ -1,14 +1,14 @@
 import type { CliId } from '../cli/types'
 
 export type SlashCommand =
-  | { name: 'close' | 'status' | 'help' | 'new' | 'resume' }
+  | { name: 'close' | 'status' | 'help' | 'new' | 'resume' | 'team' }
   | { name: 'compact'; instructions?: string }
   | { name: 'cd'; path?: string }
 
-const CD_RE = /^(?:@\S+\s+)?\/cd(?:\s+([\s\S]+?))?\s*$/
-const COMMAND_RE = /^(?:@.+\s+)?\/(close|status|help|new|resume)\s*$/
-const COMPACT_RE = /^(?:@\S+\s+)?\/compact(?:\s+([\s\S]+?))?\s*$/
-const CLI_REQUEST_RE = /^(?:@\S+\s+)?\/(claude|codex)(?:\s+([\s\S]*))?$/
+const CD_RE = /^(?:@.+?\s+)?\/cd(?:\s+([\s\S]+?))?\s*$/
+const COMPACT_RE = /^(?:@.+?\s+)?\/compact(?:\s+([\s\S]+?))?\s*$/
+const CLI_REQUEST_RE = /^(?:@.+?\s+)?\/(claude|codex)(?:\s+([\s\S]*))?$/
+const COMMAND_RE = /^(?:@.+?\s+)?\/(close|status|help|new|resume|team)\s*$/
 
 export function parseCommand(text: string): SlashCommand | undefined {
   const value = text.trim()
@@ -31,7 +31,7 @@ export function parseCommand(text: string): SlashCommand | undefined {
   if (!match) return
 
   return {
-    name: match[1] as 'close' | 'status' | 'help' | 'new' | 'resume',
+    name: match[1] as 'close' | 'status' | 'help' | 'new' | 'resume' | 'team',
   }
 }
 
